@@ -17,6 +17,19 @@ Converted from WebSim: ${url}
    \`\`\`
    *Access the emulator at http://localhost:5173 (or as indicated in terminal).*
 
+## Getting updates from WebSim
+
+When the WebSim project changes, rebuild it in the converter (open **Your Reddit apps** and click **Update**). Then, in this folder:
+
+\`\`\`bash
+npm run pull          # downloads only the files that changed
+npx devvit upload     # ships the new version to the same Reddit app
+\`\`\`
+
+\`npm run pull\` never overwrites a file you edited here. It saves the new version next to it as \`<file>.incoming\` so you can merge by hand. The link it pulls from is stored in \`.websim-devvit.json\`.
+
+The app name in \`devvit.json\` decides which Reddit app an upload goes to. Keep it the same between updates.
+
 ## How it Works
 
 - **Client Files**: The \`src/client/\` directory contains the game files. These are built and served from \`dist/client/\` inside a webview in the Reddit app.

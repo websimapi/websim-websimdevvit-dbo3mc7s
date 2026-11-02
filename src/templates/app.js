@@ -4,27 +4,27 @@ import { paymentRoutes } from './server/routes/payments.js';
 import { commentRoutes } from './server/routes/comments.js';
 import { assetRoutes } from './server/routes/assets.js';
 import { internalRoutes } from './server/routes/internal.js';
+import { websimBridgeImports, websimBridge } from './server/websim-bridge.js';
 
-export const getMainTs = (title) => {
+// options.websimServer: the project has a WebSim server.js (copied to src/server/websim/)
+export const getMainTs = (title, options = {}) => {
     const safeTitle = title.replace(/'/g, "\\'");
     return `
 import express from 'express';
-import { Devvit } from '@devvit/public-api';
-import { 
-    createServer, 
-    context, 
-    getServerPort, 
-    redis, 
+// Devvit Web server SDK. Permissions (Redis, realtime, Reddit API, payments)
+// are declared in devvit.json; the deprecated @devvit/public-api is not used.
+import {
+    createServer,
+    context,
+    getServerPort,
+    redis,
     reddit,
     realtime,
-    payments
+    payments,
+    media
 } from '@devvit/web/server';
-// Enable Realtime & Reddit API
-Devvit.configure({
-    redditAPI: true,
-    realtime: true,
-    http: true
-});
+import { RichTextBuilder } from '@devvit/shared-types/richtext/RichTextBuilder.js';
+${options.websimServer ? websimBridgeImports : ''}
 
 const app = express();
 
@@ -54,6 +54,8 @@ ${assetRoutes}
 ${internalRoutes(safeTitle)}
 
 app.use(router);
+
+${options.websimServer ? websimBridge : ''}
 
 const port = getServerPort();
 const server = createServer(app);

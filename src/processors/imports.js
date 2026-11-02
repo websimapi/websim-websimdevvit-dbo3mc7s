@@ -1,3 +1,16 @@
+// The version written in a CDN URL ("three@0.160.0", "tween.js@18.6.4"), pinned
+// exactly: games are written against that version's behaviour, and a newer major
+// can act differently (tween.js 23 changed timing and broke held-fish wiggles).
+function urlVersion(source, pkgPattern) {
+    const m = source.match(new RegExp(pkgPattern + '@(\\d+\\.\\d+\\.\\d+[^/?]*)'));
+    return m ? m[1] : null;
+}
+// A pinned version from the import map wins over a later bare specifier.
+function setDep(dependencies, pkg, version, fallback) {
+    if (version) dependencies[pkg] = version;
+    else if (!dependencies[pkg]) dependencies[pkg] = fallback;
+}
+
 // Detects libraries and converts CDN URLs to NPM package names
 export function normalizeImport(source, dependencies) {
     if (!source || typeof source !== 'string') return source;
@@ -15,7 +28,7 @@ export function normalizeImport(source, dependencies) {
 
     // 2. Three.js Handling
     if (source.includes('/three') || source === 'three') {
-        dependencies['three'] = '^0.160.0';
+        setDep(dependencies, 'three', urlVersion(source, 'three'), '^0.160.0');
         
         // Handle Addons (OrbitControls, GLTFLoader, etc.)
         // Detect "examples/jsm" or "addons"
@@ -35,7 +48,7 @@ export function normalizeImport(source, dependencies) {
 
     // 2. Tween.js
     if (source.toLowerCase().includes('tween')) {
-        dependencies['@tweenjs/tween.js'] = '^23.1.0';
+        setDep(dependencies, '@tweenjs/tween.js', urlVersion(source, 'tween\\.js'), '^23.1.0');
         return '@tweenjs/tween.js';
     }
 
@@ -67,8 +80,12 @@ export function normalizeImport(source, dependencies) {
         // Filter out common non-packages or mistakes
         if (pkg !== 'gh' && pkg !== 'npm') {
             // Update dependency if new or more specific than 'latest'
+            // An exact version in the URL is pinned exactly: that's what the game runs on
+            // Websim (Remotion 4.0.350 there, not whatever 4.x is newest).
             const current = dependencies[pkg];
-            if (!current || (current === 'latest' && ver)) {
+            const exact = ver && /^\d+\.\d+\.\d+/.test(ver) ? ver : null;
+            if (exact) dependencies[pkg] = exact;
+            else if (!current || (current === 'latest' && ver)) {
                 dependencies[pkg] = ver ? `^${ver}` : 'latest';
             }
             // Return package + subpath (e.g. react/jsx-dev-runtime)

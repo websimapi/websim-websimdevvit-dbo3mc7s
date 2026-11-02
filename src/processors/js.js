@@ -135,40 +135,42 @@ export function processJS(jsContent, filename = 'script.js', analyzer) {
         let match;
         const originalCode = code; 
         
+        const edited = []; // [start, end) ranges already overwritten
+        const overlaps = (s, e) => edited.some(([a, b]) => s < b && a < e);
         while ((match = importRegex.exec(originalCode)) !== null) {
             const url = match[2] || match[5] || match[8] || match[11];
             const prefix = match[1] || match[4] || match[7] || match[10];
-            
+
             if (url) {
                 const newVal = normalizeImport(url, analyzer.dependencies);
                 if (newVal !== url) {
                     const start = match.index + prefix.length;
                     const end = start + url.length;
                     magic.overwrite(start, end, newVal);
+                    edited.push([start, end]);
                     hasChanges = true;
                 }
             }
         }
-    }
 
-    // [Fix] Game Loading Hang: Detect image loader failures
-    // Many games use a pattern like `if (index >= urlList.length) return;` which fails to hide the loader if assets 404.
-    // We inject a fallback hideLoader() call.
-    // Also handling tighter minified spacing variants
-    const loaderHangPattern = /if\s*\(\s*([a-zA-Z0-9_]+)\s*>=\s*([a-zA-Z0-9_.]+)\.length\s*\)\s*\{?\s*(?:\/\/.*[\r\n\s]*)?return;?\s*\}?/g;
-    if (loaderHangPattern.test(code)) {
-        code = code.replace(loaderHangPattern, (match, idx, list) => {
-            return `if (${idx} >= ${list}.length) { try { if(typeof hideLoader === 'function') hideLoader(); else if(window.hideLoader) window.hideLoader(); } catch(e){} return; }`;
-        });
-        // We modified code string directly, so we reset MagicString to stay in sync if we were doing more complex ops,
-        // but here we are returning at the end. However, since we mix MagicString and string replacement, we must be careful.
-        // Re-init magic string for the return value or just return code if no other changes pending.
-        // Ideally we should use magic.overwrite, but finding the exact indices for regex match is complex with multiple matches.
-        // For simplicity in this specific processor flow, we'll return the modified code directly if we changed it here,
-        // but we must respect previous changes.
-        // Re-creating MagicString from the potentially modified code:
-        const newMagic = new MagicString(code);
-        return newMagic.toString(); 
+        // Asset paths in string literals (e.g. <Audio src={"/My Song.ogg"} />). The AST
+        // path above handles plain JS; without this, JSX files keep the original asset
+        // names, which no longer exist after cleanName() renames them.
+        const assetKeys = [...analyzer.urlMap.keys()]
+            .filter(k => /\.[a-z0-9]{2,5}$/i.test(k))
+            .sort((a, b) => b.length - a.length);
+        for (const key of assetKeys) {
+            const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const literal = new RegExp(`(["'\`])${escaped}\\1`, 'g');
+            let m;
+            while ((m = literal.exec(originalCode)) !== null) {
+                const start = m.index, end = m.index + m[0].length;
+                if (overlaps(start, end)) continue;
+                magic.overwrite(start, end, JSON.stringify(`/${analyzer.urlMap.get(key)}`));
+                edited.push([start, end]);
+                hasChanges = true;
+            }
+        }
     }
 
     // Remotion License Injection for <Player /> components
@@ -191,5 +193,16 @@ export function processJS(jsContent, filename = 'script.js', analyzer) {
             }
     }
 
-    return hasChanges ? magic.toString() : code;
+    let output = hasChanges ? magic.toString() : code;
+
+    // [Fix] Game Loading Hang: Detect image loader failures
+    // Many games use a pattern like `if (index >= urlList.length) return;` which fails to hide the loader if assets 404.
+    // We inject a fallback hideLoader() call. This runs last, on the finished output,
+    // so the import and asset rewrites above are kept (v1 returned early and lost them).
+    const loaderHangPattern = /if\s*\(\s*([a-zA-Z0-9_]+)\s*>=\s*([a-zA-Z0-9_.]+)\.length\s*\)\s*\{?\s*(?:\/\/.*[\r\n\s]*)?return;?\s*\}?/g;
+    output = output.replace(loaderHangPattern, (match, idx, list) => {
+        return `if (${idx} >= ${list}.length) { try { if(typeof hideLoader === 'function') hideLoader(); else if(window.hideLoader) window.hideLoader(); } catch(e){} return; }`;
+    });
+
+    return output;
 }

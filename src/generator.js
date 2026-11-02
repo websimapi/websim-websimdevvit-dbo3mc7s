@@ -1,3 +1,4 @@
+import { GOLD_ICON_PNG_BASE64 } from './templates/gold-icon.js';
 import JSZip from 'jszip';
 import { 
     cleanName, 
@@ -5,6 +6,8 @@ import {
 } from './processors.js';
 
 import {
+    APP_NAME_PATTERN,
+    SQLJS_VERSION,
     generatePackageJson,
     generateDevvitJson,
     generateClientViteConfig,
@@ -28,13 +31,50 @@ import {
 import { generateGoldIcon } from './generator/icons.js';
 import { downloadExternalAssets } from './generator/downloader.js';
 
-export async function generateDevvitZip(projectMeta, assets, includeReadme = true, launchMode = 'inline') {
+// The app name Devvit would get if the user doesn't choose one.
+export function defaultAppName(project) {
+    const safeId = project?.id ? String(project.id).slice(0, 4).toLowerCase().replace(/[^a-z0-9]/g, '0') : '0000';
+    const slug = cleanName(project?.slug || "websim-game").toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^[^a-z]+/, '');
+    return `${(slug || 'game').slice(0, 11)}-${safeId}`;
+}
+
+// options.appName   — devvit.json `name`; reuse your existing app's name to update it instead of creating a new app
+// options.payments  — 'auto' (detect tipping code), 'on' or 'off'
+// options.pullScript — text of pull.mjs, shipped as scripts/pull.mjs so `npm run pull` fetches updates
+// server.js plus the modules it imports by relative path (recursively), as
+// { path: content }, or null when the project has no server.js.
+function collectWebsimServerFiles(codeFiles) {
+    const text = (c) => (c instanceof Uint8Array ? new TextDecoder().decode(c) : String(c));
+    if (!codeFiles['server.js']) return null;
+    const out = {};
+    const queue = ['server.js'];
+    while (queue.length) {
+        const path = queue.shift();
+        if (out[path] || codeFiles[path] === undefined) continue;
+        const code = text(codeFiles[path]);
+        out[path] = code;
+        const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+        for (const m of code.matchAll(/(?:import|export)\s[^'"]*?from\s*['"](\.{1,2}\/[^'"]+)['"]|import\s*\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g)) {
+            const spec = m[1] || m[2];
+            const parts = (dir + spec).split('/');
+            const resolved = [];
+            for (const part of parts) {
+                if (part === '..') resolved.pop();
+                else if (part !== '.' && part !== '') resolved.push(part);
+            }
+            queue.push(resolved.join('/'));
+        }
+    }
+    return out;
+}
+
+export async function generateDevvitZip(projectMeta, assets, includeReadme = true, launchMode = 'inline', options = {}) {
     const zip = new JSZip();
-    
-    const safeId = projectMeta.project.id ? projectMeta.project.id.slice(0, 4) : '0000';
-    const rawSlug = cleanName(projectMeta.project.slug || "websim-game");
-    const truncatedSlug = rawSlug.slice(0, 11);
-    const projectSlug = `${truncatedSlug}-${safeId}`;
+
+    const projectSlug = options.appName || defaultAppName(projectMeta.project);
+    if (!APP_NAME_PATTERN.test(projectSlug)) {
+        throw new Error(`"${projectSlug}" is not a valid Reddit app name: use 3–20 lowercase letters, numbers or hyphens, starting with a letter.`);
+    }
     const projectTitle = projectMeta.project.title || "WebSim Game";
 
     // Initialize Analyzer
@@ -55,9 +95,11 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
         if (/\.(html|js|mjs|ts|jsx|tsx|css|json|txt|md)$/i.test(path)) {
             codeFiles[path] = content;
         } else {
-            // Static Assets (Images, Audio, Models)
+            // Static Assets (Images, Audio, Models). They keep their folders, so
+            // paths the game builds at runtime (`assets/models/${id}.glb`) still
+            // resolve; literal references are rewritten through urlMap as before.
             const name = path.split('/').pop();
-            const clean = cleanName(name);
+            const clean = path.split('/').map(cleanName).join('/');
             
             // Avoid overwrite collision
             let finalName = clean;
@@ -73,11 +115,13 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
             staticFiles[finalName] = content;
             
             // Map common ways this file might be referenced
-            urlMap.set(path, finalName);           // "folder/song.mp3" -> "song.mp3"
-            urlMap.set('/' + path, finalName);     // "/folder/song.mp3" -> "song.mp3"
-            urlMap.set('./' + path, finalName);    // "./folder/song.mp3" -> "song.mp3"
-            urlMap.set(name, finalName);           // "song.mp3" -> "song.mp3"
-            urlMap.set('/' + name, finalName);     // "/song.mp3" -> "song.mp3"
+            urlMap.set(path, finalName);           // "Folder/My Song.mp3" -> "folder/my-song.mp3"
+            urlMap.set('/' + path, finalName);
+            urlMap.set('./' + path, finalName);
+            if (!urlMap.has(name)) {               // bare "My Song.mp3" (first file of that name wins)
+                urlMap.set(name, finalName);
+                urlMap.set('/' + name, finalName);
+            }
         }
     }
 
@@ -100,6 +144,13 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
 
     analyzer.setExternalMap(urlMap);
 
+    // 3b. WebSim server.js: it runs on the Devvit server (see templates/server/websim-bridge.js),
+    // together with every module it imports by relative path. server.js itself is
+    // never shipped to the browser; imported modules may still be shared with the client.
+    const websimServerFiles = collectWebsimServerFiles(codeFiles);
+    const hasWebsimServer = !!websimServerFiles;
+    if (hasWebsimServer) delete codeFiles['server.js'];
+
     // 4. Process Code Files
     const clientFiles = {};
 
@@ -107,7 +158,14 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     let entrypoints = null; // Default handled in config.js if null
     let viteInputs = {};
 
-    if (launchMode === 'expanded') {
+    if (launchMode === 'live') {
+        // The game itself is the inline post (its live title screen, taps only: see
+        // polyfills/stubs/inline.js); a tap opens the same page expanded as "game".
+        entrypoints = {
+            "default": { "entry": "index.html", "height": "tall", "inline": true },
+            "game": { "entry": "index.html" }
+        };
+    } else if (launchMode === 'expanded') {
         const launcherHtml = generateLauncherHtml(projectTitle, projectMeta.project.thumbnail_url);
         clientFiles['launcher.html'] = launcherHtml;
 
@@ -169,6 +227,7 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     }
 
     const extraDevDeps = {};
+    if (hasWebsimServer) analyzer.dependencies['sql.js'] = SQLJS_VERSION;
 
     // 5. Detect Tipping Logic
     let hasTips = false;
@@ -185,14 +244,16 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     ];
     
     // Scan all code content for tipping indications
+    let tipsDetected = false;
     for (const content of Object.values(codeFiles)) {
         const str = (content instanceof Uint8Array) ? new TextDecoder().decode(content) : String(content);
         if (tipKeywords.some(rx => rx.test(str))) {
-            hasTips = true;
+            tipsDetected = true;
             console.log("[Generator] Tipping logic detected.");
             break;
         }
     }
+    hasTips = options.payments === 'on' || (options.payments !== 'off' && tipsDetected);
 
     // 6. Add Payment Product Icons (Gold Fallback) - Only if tips detected
     if (hasTips) {
@@ -200,21 +261,13 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
         const validGoldTiers = [5, 25, 50, 100, 150, 250, 500, 1000, 2500];
 
         // removed async function generateGoldIcon() {} (Moved to icons.js)
-        let iconData = await generateGoldIcon();
-        
-        // Attempt high-quality remote fetch as preference
-        try {
-            const GOLD_ICON_URL = 'https://websim.ai/a/fd74f00a-3bc8-4538-bc68-1e6706b50d45';
-            const iconRes = await fetch(GOLD_ICON_URL);
-            if (iconRes.ok) {
-                const ab = await iconRes.arrayBuffer();
-                const remoteIcon = new Uint8Array(ab);
-                // Quick check: standard PNG header
-                if (remoteIcon[0] === 0x89 && remoteIcon[1] === 0x50) {
-                    iconData = remoteIcon;
-                }
-            }
-        } catch (e) {}
+        let iconData = null;
+        try { iconData = await generateGoldIcon(); } catch (e) {}
+        // No canvas (Node) or drawing failed: use the built-in coin icon. Devvit
+        // refuses an upload whose products.json names missing images.
+        if (!iconData || !iconData.length) {
+            iconData = Uint8Array.from(atob(GOLD_ICON_PNG_BASE64), (c) => c.charCodeAt(0));
+        }
 
         // Populate the /assets directory at the project root
         // We ALWAYS create the folder and at least one file if hasTips is true to avoid Devvit CLI "missing dir" errors
@@ -298,8 +351,16 @@ export default {
         }
     }
 
+    // Games that call websim.upload, or save files with <a download> (re-hosted on
+    // Reddit by the download polyfill), need Reddit's media permission.
+    const usesUpload = Object.values(codeFiles).some(c => {
+        const code = c instanceof Uint8Array ? new TextDecoder().decode(c) : String(c);
+        return /websim\.upload\s*\(/.test(code) || /\.download\s*=|\sdownload\s*=\s*["']|setAttribute\(\s*['"]download['"]/.test(code);
+    });
+    // Reddit media only takes images and GIFs, so shared videos are turned into GIFs.
+    if (usesUpload) analyzer.dependencies['gifenc'] = '1.0.3';
     zip.file("package.json", generatePackageJson(projectSlug, analyzer.dependencies, extraDevDeps));
-    zip.file("devvit.json", generateDevvitJson(projectSlug, entrypoints, hasTips));
+    zip.file("devvit.json", generateDevvitJson(projectSlug, entrypoints, hasTips, { media: usesUpload }));
     zip.file("tsconfig.json", tsConfig);
 
     if (hasTips) {
@@ -321,13 +382,14 @@ export default {
             "products": products
         }, null, 2));
     }
-    zip.file(".gitignore", "node_modules\n.devvit\ndist"); 
+    zip.file(".gitignore", "node_modules\n.devvit\ndist\n*.incoming\n");
 
     if (includeReadme) {
         zip.file("README.md", generateReadme(projectTitle, `https://websim.ai/p/${projectMeta.project.id}`));
     }
 
     zip.file("scripts/setup.js", setupScript);
+    if (options.pullScript) zip.file("scripts/pull.mjs", options.pullScript);
     zip.file("scripts/validate.js", validateScript);
 
     // 3. Client Folder (src/client)
@@ -366,7 +428,8 @@ export default {
     }
 
     // Prepare Polyfill Imports (Static) - hoisting import to top to avoid dynamic import issues
-    let polyfillImports = "import { connectRealtime, purchase, OrderResultStatus } from '@devvit/web/client';\nwindow.connectRealtime = connectRealtime;\nwindow.purchase = purchase;\nwindow.OrderResultStatus = OrderResultStatus;\n";
+    let polyfillImports = "import { connectRealtime, purchase, OrderResultStatus, navigateTo, showToast, getWebViewMode, requestExpandedMode, getShareData } from '@devvit/web/client';\nwindow.connectRealtime = connectRealtime;\nwindow.purchase = purchase;\nwindow.OrderResultStatus = OrderResultStatus;\nwindow.__devvitNavigateTo = navigateTo;\nwindow.__devvitShowToast = showToast;\nwindow.__devvitGetWebViewMode = getWebViewMode;\nwindow.__devvitRequestExpandedMode = requestExpandedMode;\nwindow.__DEVVIT_LAUNCH = " + JSON.stringify(launchMode) + ";\n// Opened from a share link (?devvitshare=...): the data the link carries, e.g. which replay to play.\ntry { window.__devvitShareData = getShareData(); } catch (e) {}\n";
+    if (usesUpload) polyfillImports += "import { GIFEncoder, quantize, applyPalette } from 'gifenc';\nwindow.__gifenc = { GIFEncoder, quantize, applyPalette };\n";
     
     // Combine
     const combinedPolyfills = [polyfillImports, shimCode, simpleLoggerJs, webAudioPolyfill, websimSocketPolyfill, websimStubsJs, avatarInjector].join('\n\n');
@@ -384,10 +447,19 @@ export { Player } from '@remotion/player';
 
     // 4. Server Folder (src/server)
     const serverFolder = srcFolder.folder("server");
-    serverFolder.file("index.ts", getMainTs(projectTitle));
-    serverFolder.file("vite.config.ts", generateServerViteConfig());
+    serverFolder.file("index.ts", getMainTs(projectTitle, { websimServer: hasWebsimServer }));
+    serverFolder.file("vite.config.ts", generateServerViteConfig({ websimServer: hasWebsimServer }));
+    if (hasWebsimServer) {
+        for (const [path, content] of Object.entries(websimServerFiles)) serverFolder.file(`websim/${path}`, content);
+    }
     
+    // The same files as a flat map, for uploading a build to the converter server.
+    const files = {};
+    for (const [path, entry] of Object.entries(zip.files)) {
+        if (!entry.dir) files[path] = await entry.async('uint8array');
+    }
+
     const blob = await zip.generateAsync({ type: "blob" });
-    return { blob, filename: `${projectSlug}-devvit.zip` };
+    return { blob, filename: `${projectSlug}-devvit.zip`, files, appName: projectSlug, payments: hasTips, tipsDetected };
 }
 

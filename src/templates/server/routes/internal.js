@@ -89,6 +89,16 @@ router.get('/api/realtime/presence', async (req, res) => {
 
 router.post('/internal/onInstall', async (req, res) => {
     console.log('App installed!');
+    // Start a new community off with one game post, as Reddit's official templates do.
+    // Runs on fresh installs only (upgrades fire onAppUpgrade, which isn't wired up).
+    try {
+        const subredditName = context?.subredditName;
+        if (subredditName) {
+            await reddit.submitCustomPost({ title: '${safeTitle}', subredditName, entry: 'default' });
+        }
+    } catch (e) {
+        console.error('Could not create the first game post:', e);
+    }
     res.json({ success: true });
 });
 

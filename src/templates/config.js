@@ -1,3 +1,12 @@
+// Devvit release the generated projects are tested against. Pinned instead of
+// "latest" so a new Devvit release can't silently break an existing port.
+export const DEVVIT_VERSION = '0.15.1';
+// SQLite (WebAssembly) used to run WebSim server.js databases on Devvit.
+export const SQLJS_VERSION = '1.13.0';
+
+// devvit.json `name`: 3-20 chars, starts with a letter, lowercase letters, digits, hyphens.
+export const APP_NAME_PATTERN = /^[a-z][a-z0-9-]{2,19}$/;
+
 export const generatePackageJson = (slug, dependencies = {}, devDependencies = {}) => JSON.stringify({
   "name": slug,
   "version": "0.0.1",
@@ -8,33 +17,35 @@ export const generatePackageJson = (slug, dependencies = {}, devDependencies = {
     "build:client": "cd src/client && vite build",
     "build:server": "cd src/server && vite build",
     "build": "npm run build:server && npm run build:client",
-    "setup": "node scripts/setup.js", 
+    "watch": "npm run build:server && cd src/client && vite build --watch",
+    "setup": "node scripts/setup.js",
     "register": "devvit upload",
     "upload": "devvit upload",
+    "pull": "node scripts/pull.mjs",
     "validate": "node scripts/validate.js"
   },
   "dependencies": {
-    "@devvit/public-api": "latest",
-    "@devvit/kit": "latest",
-    "@devvit/web": "latest",
-    "@devvit/redis": "latest",
-    "@devvit/payments": "latest",
-    "express": "^4.18.2",
+    "@devvit/web": DEVVIT_VERSION,
+    "express": "^4.21.2",
     ...dependencies
   },
   "devDependencies": {
-    "devvit": "latest",
-    "typescript": "^5.0.0",
-    "vite": "^5.0.0",
-    "terser": "^5.19.0",
-    "@vitejs/plugin-react": "^4.2.0",
-    "@babel/core": "^7.23.0",
-    "@babel/preset-react": "^7.23.0",
+    "devvit": DEVVIT_VERSION,
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "terser": "^5.36.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "@babel/core": "^7.26.0",
+    "@babel/preset-react": "^7.26.0",
     ...devDependencies
+  },
+  "engines": {
+    "node": ">=22.2.0"
   }
 }, null, 2);
 
-export const generateDevvitJson = (slug, entrypoints, enablePayments = true) => {
+// options.media: the game calls websim.upload, so images go to Reddit's media CDN.
+export const generateDevvitJson = (slug, entrypoints, enablePayments = true, options = {}) => {
   const config = {
     "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
     "name": slug,
@@ -43,22 +54,30 @@ export const generateDevvitJson = (slug, entrypoints, enablePayments = true) => 
       "entrypoints": entrypoints || {
         "default": {
           "entry": "index.html",
-          "height": "tall",
-          "inline": true
+          "height": "tall"
         }
       }
     },
 
     "server": {
+      "dir": "dist/server",
       "entry": "index.cjs"
     },
     "permissions": {
       "redis": true,
       "realtime": true,
+      "payments": enablePayments,
+      "media": !!options.media,
       "reddit": {
         "enable": true,
         "asUser": ["SUBMIT_POST", "SUBMIT_COMMENT"]
       }
+    },
+    // The Devvit CLI runs these itself, so `devvit upload` and `devvit playtest`
+    // always ship a fresh build.
+    "scripts": {
+      "dev": "npm run watch",
+      "build": "npm run build"
     },
     "triggers": {
       "onAppInstall": "/internal/onInstall"
@@ -139,7 +158,9 @@ export default defineConfig({
   build: {
     outDir: '../../dist/client',
     emptyOutDir: true,
-    target: 'es2020',
+    // Reddit's webviews are current browsers; es2022 allows top-level await,
+    // which many Websim games use while loading.
+    target: 'es2022',
     minify: 'terser', // ← CHANGE FROM esbuild to terser for better CSP compliance
     terserOptions: {
       compress: {
@@ -185,7 +206,7 @@ export default defineConfig({
   optimizeDeps: {
     include: [${hasReact ? "'react', 'react-dom', 'react/jsx-runtime'" : ""}, ${hasRemotion ? "'remotion', '@remotion/player'" : ""}],
     esbuildOptions: {
-      target: 'es2020',
+      target: 'es2022',
       legalComments: 'none' // ← ADD THIS
     }
   }
@@ -198,9 +219,7 @@ export const tsConfig = JSON.stringify({
     "module": "es2020",
     "moduleResolution": "node",
     "lib": ["es2020", "dom"],
-    "jsx": "react",
-    "jsxFactory": "Devvit.createElement",
-    "jsxFragmentFactory": "Devvit.Fragment",
+    "jsx": "react-jsx",
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
@@ -212,11 +231,32 @@ export const tsConfig = JSON.stringify({
   ]
 }, null, 2);
 
-export const generateServerViteConfig = () => `
+// options.websimServer: inline sql.js's WebAssembly at build time (the Devvit
+// server can't read files at runtime) as the module 'virtual:sqljs-wasm'.
+export const generateServerViteConfig = (options = {}) => `
 import { defineConfig } from 'vite';
-import { builtinModules } from 'node:module';
-
+import { builtinModules, createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+${options.websimServer ? `
+const require = createRequire(import.meta.url);
+const sqljsWasm = () => ({
+  name: 'sqljs-wasm',
+  resolveId(id) { return id === 'virtual:sqljs-wasm' ? '\\0sqljs-wasm' : null; },
+  load(id) {
+    if (id !== '\\0sqljs-wasm') return null;
+    const wasm = readFileSync(require.resolve('sql.js/dist/sql-wasm.wasm'));
+    return 'export default ' + JSON.stringify(wasm.toString('base64')) + ';';
+  },
+  // sql.js sets \`module = undefined\` and guards one emscripten line with
+  // typeof module; bundling turns that check into a constant, so drop the line.
+  transform(code, id) {
+    if (!id.includes('sql.js/dist/sql-wasm.js')) return null;
+    return code.replace('"undefined"!=typeof module&&(module.exports=f);', '');
+  },
+});
+` : ''}
 export default defineConfig({
+  ${options.websimServer ? 'plugins: [sqljsWasm()],' : ''}
   ssr: {
     noExternal: true,
   },

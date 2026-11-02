@@ -86,44 +86,28 @@ export const websimStub = `
                 }
             },
             upload: async (file) => {
-                // Smart Upload: JSON persistence via Redis, Media via BlobURL (session)
-                try {
-                    let isJson = file.type === 'application/json' || (file.name && file.name.endsWith('.json'));
-                    
-                    if (!isJson && (!file.type || file.type === 'text/plain')) {
-                        try {
-                            // Quick sniff for JSON content
-                            const text = await file.text();
-                            const trimmed = text.trim();
-                            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-                                JSON.parse(trimmed);
-                                isJson = true;
-                            }
-                        } catch(e) {}
-                    }
-
-                    if (isJson) {
-                        const text = await file.text();
-                        const data = JSON.parse(text);
-                        // Generate ID
-                        const key = 'up_' + Math.random().toString(36).substr(2, 9);
-                        
-                        // Upload to our custom JSON route
-                        await fetch('/api/json/' + key, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(data)
-                        });
-                        
-                        return '/api/json/' + key;
-                    }
-                    
-                    // Fallback to Blob URL for images/audio (Session only)
-                    return URL.createObjectURL(file);
-                } catch(e) { 
-                    console.error("Upload failed", e);
-                    return ''; 
+                // Uploads go to the app server (/api/__upload). Images, GIFs and videos are
+                // re-hosted on Reddit's media CDN (Reddit apps may only display
+                // Reddit-hosted media); other files are stored by the app. Either
+                // way the URL works for every player, unlike a session blob: URL.
+                const blob = file instanceof Blob ? file : new Blob([file]);
+                let type = (blob.type || '').toLowerCase();
+                const name = (file && file.name) || 'upload';
+                if (!type && /\\.json$/i.test(name)) type = 'application/json';
+                const res = await fetch('/api/__upload', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'X-Upload-Type': type || 'application/octet-stream',
+                        'X-Upload-Name': name
+                    },
+                    body: blob
+                });
+                const result = await res.json().catch(() => ({}));
+                if (!res.ok || !result.url) {
+                    throw new Error(result.error || ('Upload failed (' + res.status + ')'));
                 }
+                return result.url;
             }
         };
     }

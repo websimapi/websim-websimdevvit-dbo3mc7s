@@ -5,13 +5,15 @@ import { processJS } from './js.js';
 export function processHTML(htmlContent, filename, analyzer) {
     let html = uint8ToString(htmlContent);
 
-    // Rewrite Mapped URLs in HTML
-    analyzer.urlMap.forEach((cleanName, originalUrl) => {
-        // Replace instances of originalUrl with /cleanName
-        if (originalUrl && html.includes(originalUrl)) {
-            html = html.split(originalUrl).join(`/${cleanName}`);
-        }
-    });
+    // Rewrite mapped asset URLs in one pass, whole paths only (inside quotes or
+    // url()). Replacing keys one after another rewrote already-rewritten paths
+    // ("assets/ui/a.png" -> "/assets/ui//assets/ui/a.png").
+    const keys = [...analyzer.urlMap.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+    if (keys.length) {
+        const escaped = keys.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        const re = new RegExp(`(["'(])(${escaped.join('|')})(?=["')?#])`, 'g');
+        html = html.replace(re, (m, open, url) => `${open}/${analyzer.urlMap.get(url)}`);
+    }
 
     const extractedScripts = [];
     let scriptCounter = 0;

@@ -30,6 +30,32 @@ async function mapLimit(items, limit, fn) {
     return results;
 }
 
+// The project's own CDN serves every revision's files at
+// https://<project-id>.c.websim.com/<path>?v=<version>. A request without a WebSim
+// referrer gets a wrapper page for HTML files instead, so that case is rejected.
+// `raw=1` returns the uploaded source; without it .jsx/.tsx come back already transpiled.
+export async function fetchFromCdn(projectId, version, path) {
+    if (!projectId || !version || projectId === 'imported-zip') return null;
+    const encoded = path.split('/').map(encodeURIComponent).join('/');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const res = await fetch(`https://${projectId}.c.websim.com/${encoded}?v=${version}&raw=1`, { cache: 'no-store' });
+            if (res.status === 404) return null;
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const bytes = new Uint8Array(await res.arrayBuffer());
+            if (/\.html?$/i.test(path)) {
+                const head = new TextDecoder().decode(bytes.slice(0, 4000));
+                if (head.includes('result-iframe-wrap') || head.includes('name="contentWindow"')) return null;
+            }
+            return bytes;
+        } catch (e) {
+            if (attempt === 3) console.warn(`[WebSimAPI] ${path} -> CDN fetch failed: ${e.message}`);
+            else await new Promise(r => setTimeout(r, 250 * attempt));
+        }
+    }
+    return null;
+}
+
 export async function getAssetMetadata(projectId, version, path) {
     try {
         return await makeRequest(`/projects/${projectId}/revisions/${version}/assets/${encodeURIComponent(path)}`);
@@ -136,7 +162,15 @@ export async function processAssets(assetList, projectId, version) {
         }
 
         const isText = /\.(html|js|mjs|jsx|ts|tsx|css|json|txt|md|xml|svg|csv)$/i.test(path);
-        
+
+        // 1b. Project CDN with the full path (text and binary). This returns the exact
+        // uploaded bytes and is the most reliable source; the strategies below are fallbacks.
+        const fromCdn = await fetchFromCdn(projectId, version, path);
+        if (fromCdn) {
+            files[path] = fromCdn;
+            return;
+        }
+
         // 2. Identify URL & Metadata Recovery
         // Sometimes the asset list is sparse, so we check various keys or fetch detailed metadata
         let url = asset.url || asset.src || asset.uri || asset.download_url;
