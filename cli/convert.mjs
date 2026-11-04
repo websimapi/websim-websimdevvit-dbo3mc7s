@@ -87,10 +87,13 @@ for (const [name, entry] of Object.entries(zip.files)) {
     if (entry.dir) continue;
     const dest = path.join(out, name);
     if (keepFiles.has(name) && fs.existsSync(dest)) {
-        // A kept README still gets the current "Fetch Domains" section (Reddit's domain review reads it).
+        // A kept README still gets the current "Fetch Domains" section (Reddit's domain review reads it),
+        // unless its own section already names every requested domain (a hand-written, more detailed one).
         if (name === 'README.md') {
             const section = (t) => t.match(/\n## Fetch Domains\n[\s\S]*?(?=\n## |$)/)?.[0] || '';
             const mine = fs.readFileSync(dest, 'utf8'), fresh = section(await entry.async('string'));
+            const hosts = (res.report?.server?.hosts || []);
+            if (hosts.length && hosts.every((h) => section(mine).includes('`' + h + '`'))) continue;
             const without = mine.replace(section(mine), '');
             const merged = fresh ? without.replace(/^(\s*#[^\n]*\n(?:(?!## )[^\n]*\n)*)/, (top) => top + fresh.replace(/^\n/, '') + '\n') : without;
             if (merged !== mine) fs.writeFileSync(dest, merged);

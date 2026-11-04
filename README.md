@@ -96,7 +96,7 @@ cd <reddit-project-folder> && npm install && npm run build && npx devvit upload
 npx devvit install <test_subreddit> <reddit-app>@<version>
 ```
 
-The first run creates the Devvit project. Later runs update it in place: generated files are replaced, and the Devvit CLI's own fields (`package.json` version/license, `devvit.json` dev), your `devvit.json` `marketingAssets` and a hand-written README.md or DEVELOPMENT.md are kept.
+The first run creates the Devvit project. Later runs update it in place: generated files are replaced, and the Devvit CLI's own fields (`package.json` version/license, `devvit.json` dev), your `devvit.json` `marketingAssets` and a hand-written README.md or DEVELOPMENT.md are kept. The README's "Fetch Domains" section is refreshed from server.js's `// Fetch domain` lines, unless you've written your own section that names every requested domain in backticks: then yours is kept.
 
 **App icon:** Reddit shows `marketingAssets.icon` (a 1024×1024 PNG, at most 500 KB) on the app's page. Put the file at `marketing/icon.png` in the Devvit project, not in `assets/`, `src/` or `scripts/` (those are regenerated), and add `"marketingAssets": { "icon": "marketing/icon.png" }` to `devvit.json` once.
 
