@@ -1,8 +1,14 @@
-export const generateReadme = (title, url) => `
+export const generateReadme = (title, url, { httpDomains = [], reasons = {} } = {}) => `
 # ${title}
 
 Converted from WebSim: ${url}
+${httpDomains.length ? `
+## Fetch Domains
 
+The app's server (the game's \`server.js\`) requests these domains:
+
+${httpDomains.map((d) => `- \`${d}\` - ${reasons[d] || 'used by the game\'s server. Say what it\'s for and why Devvit\'s own storage can\'t do it (a `// Fetch domain ' + d + ': <reason>` line in server.js fills this in).'}`).join('\n')}
+` : ''}
 ## Quick Start
 
 1. **Setup**: Install dependencies and register the app.

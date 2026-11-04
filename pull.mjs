@@ -52,7 +52,7 @@ const nextSnapshots = { ...snapshots };
 
 // Fields the Devvit CLI itself writes into these files. If those are the only
 // local differences, the new version is taken and the fields are kept.
-const CLI_MANAGED = { 'package.json': ['version', 'license'], 'devvit.json': ['dev'] };
+const CLI_MANAGED = { 'package.json': ['version', 'license'], 'devvit.json': ['dev', 'marketingAssets'] };
 const omit = (obj, keys) => { const o = { ...obj }; for (const k of keys) delete o[k]; return o; };
 
 function mergeCliManaged(p, localBuf, incomingBuf) {

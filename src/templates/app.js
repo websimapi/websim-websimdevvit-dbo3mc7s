@@ -5,6 +5,7 @@ import { commentRoutes } from './server/routes/comments.js';
 import { assetRoutes } from './server/routes/assets.js';
 import { internalRoutes } from './server/routes/internal.js';
 import { websimBridgeImports, websimBridge } from './server/websim-bridge.js';
+import { websimRoomBridge } from './server/websim-room.js';
 
 // options.websimServer: the project has a WebSim server.js (copied to src/server/websim/)
 export const getMainTs = (title, options = {}) => {
@@ -21,7 +22,8 @@ import {
     reddit,
     realtime,
     payments,
-    media
+    media,
+    settings
 } from '@devvit/web/server';
 import { RichTextBuilder } from '@devvit/shared-types/richtext/RichTextBuilder.js';
 ${options.websimServer ? websimBridgeImports : ''}
@@ -56,6 +58,7 @@ ${internalRoutes(safeTitle)}
 app.use(router);
 
 ${options.websimServer ? websimBridge : ''}
+${options.websimServer ? websimRoomBridge : ''}
 
 const port = getServerPort();
 const server = createServer(app);

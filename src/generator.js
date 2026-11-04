@@ -1,3 +1,4 @@
+import { diagnose } from './doctor.js';
 import { GOLD_ICON_PNG_BASE64 } from './templates/gold-icon.js';
 import JSZip from 'jszip';
 import { 
@@ -94,12 +95,18 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
         // Code Files
         if (/\.(html|js|mjs|ts|jsx|tsx|css|json|txt|md)$/i.test(path)) {
             codeFiles[path] = content;
+            // Data the game fetch()es at runtime (npc/<id>/soul.md, levels.json…)
+            // only reaches the build if it's also a static file, at its exact path.
+            const base = path.split('/').pop();
+            if (/\.(json|txt|md)$/i.test(path) && !base.startsWith('.') && !/^(package(-lock)?|tsconfig|jsconfig)\.json$/i.test(base)) staticFiles[path] = content;
         } else {
             // Static Assets (Images, Audio, Models). They keep their folders, so
             // paths the game builds at runtime (`assets/models/${id}.glb`) still
             // resolve; literal references are rewritten through urlMap as before.
             const name = path.split('/').pop();
-            const clean = path.split('/').map(cleanName).join('/');
+            // URL-safe names stay exactly as they are (case too): paths the game
+            // builds at runtime (`models/${name}.glb`) can't be rewritten.
+            const clean = path.split('/').map((part) => /^[A-Za-z0-9_.-]+$/.test(part) ? part : cleanName(part)).join('/');
             
             // Avoid overwrite collision
             let finalName = clean;
@@ -150,6 +157,17 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     const websimServerFiles = collectWebsimServerFiles(codeFiles);
     const hasWebsimServer = !!websimServerFiles;
     if (hasWebsimServer) delete codeFiles['server.js'];
+
+    // Node scripts that ship with a project (build tools such as tools/*.mjs) import
+    // node: built-ins and never run in the browser: leave them out of the client.
+    for (const [path, content] of Object.entries(codeFiles)) {
+        if (!/\.(m?js|ts)$/i.test(path)) continue;
+        const code = content instanceof Uint8Array ? new TextDecoder().decode(content) : String(content);
+        if (/(from\s*|import\(\s*|require\(\s*)['"]node:/.test(code)) {
+            delete codeFiles[path];
+            console.log(`[Generator] Left out Node script ${path}`);
+        }
+    }
 
     // 4. Process Code Files
     const clientFiles = {};
@@ -359,8 +377,12 @@ export default {
     });
     // Reddit media only takes images and GIFs, so shared videos are turned into GIFs.
     if (usesUpload) analyzer.dependencies['gifenc'] = '1.0.3';
+
+    // Port doctor: what behaves differently on Reddit, the hints the game gets,
+    // and safe fixes (see doctor.js). Written to PORT-REPORT.md.
+    const report = diagnose(assets, { launchMode, forceQuality: options.quality || null });
     zip.file("package.json", generatePackageJson(projectSlug, analyzer.dependencies, extraDevDeps));
-    zip.file("devvit.json", generateDevvitJson(projectSlug, entrypoints, hasTips, { media: usesUpload }));
+    zip.file("devvit.json", generateDevvitJson(projectSlug, entrypoints, hasTips, { media: usesUpload, httpDomains: report.server.hosts, secrets: report.server.secrets }));
     zip.file("tsconfig.json", tsConfig);
 
     if (hasTips) {
@@ -385,9 +407,10 @@ export default {
     zip.file(".gitignore", "node_modules\n.devvit\ndist\n*.incoming\n");
 
     if (includeReadme) {
-        zip.file("README.md", generateReadme(projectTitle, `https://websim.ai/p/${projectMeta.project.id}`));
+        zip.file("README.md", generateReadme(projectTitle, `https://websim.ai/p/${projectMeta.project.id}`, { httpDomains: report.server.hosts, reasons: report.server.hostReasons }));
     }
 
+    zip.file("PORT-REPORT.md", report.markdown);
     zip.file("scripts/setup.js", setupScript);
     if (options.pullScript) zip.file("scripts/pull.mjs", options.pullScript);
     zip.file("scripts/validate.js", validateScript);
@@ -430,9 +453,13 @@ export default {
     // Prepare Polyfill Imports (Static) - hoisting import to top to avoid dynamic import issues
     let polyfillImports = "import { connectRealtime, purchase, OrderResultStatus, navigateTo, showToast, getWebViewMode, requestExpandedMode, getShareData } from '@devvit/web/client';\nwindow.connectRealtime = connectRealtime;\nwindow.purchase = purchase;\nwindow.OrderResultStatus = OrderResultStatus;\nwindow.__devvitNavigateTo = navigateTo;\nwindow.__devvitShowToast = showToast;\nwindow.__devvitGetWebViewMode = getWebViewMode;\nwindow.__devvitRequestExpandedMode = requestExpandedMode;\nwindow.__DEVVIT_LAUNCH = " + JSON.stringify(launchMode) + ";\n// Opened from a share link (?devvitshare=...): the data the link carries, e.g. which replay to play.\ntry { window.__devvitShareData = getShareData(); } catch (e) {}\n";
     if (usesUpload) polyfillImports += "import { GIFEncoder, quantize, applyPalette } from 'gifenc';\nwindow.__gifenc = { GIFEncoder, quantize, applyPalette };\n";
+    // What the game can adapt to (doctor.js): platform, launch view, suggested quality.
+    polyfillImports += "window.__portHints = " + JSON.stringify(report.hints) + ";\n";
     
     // Combine
-    const combinedPolyfills = [polyfillImports, shimCode, simpleLoggerJs, webAudioPolyfill, websimSocketPolyfill, websimStubsJs, avatarInjector].join('\n\n');
+    // AI calls that don't check the API exists would throw; give them an API that fails at once.
+    const aiStub = report.unguardedAi ? "(function () { var no = function () { return Promise.reject(new Error('AI is not available on Reddit.')); }; var w = window.websim; if (!w) return; w.chat = w.chat || { completions: { create: no } }; w.imageGen = w.imageGen || no; w.textToSpeech = w.textToSpeech || no; })();" : '';
+    const combinedPolyfills = [polyfillImports, shimCode, simpleLoggerJs, webAudioPolyfill, websimSocketPolyfill, websimStubsJs, aiStub, avatarInjector].join('\n\n');
     clientFolder.file("websim_polyfills.js", combinedPolyfills);
     clientFolder.file("websim_package.js", websimPackageJs);
     clientFolder.file("jsx-dev-proxy.js", jsxDevProxy);
@@ -460,6 +487,6 @@ export { Player } from '@remotion/player';
     }
 
     const blob = await zip.generateAsync({ type: "blob" });
-    return { blob, filename: `${projectSlug}-devvit.zip`, files, appName: projectSlug, payments: hasTips, tipsDetected };
+    return { blob, filename: `${projectSlug}-devvit.zip`, files, appName: projectSlug, payments: hasTips, tipsDetected, report };
 }
 

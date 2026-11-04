@@ -1,5 +1,6 @@
 import { realtimePresence } from './realtime/presence.js';
 import { realtimeMessaging } from './realtime/messaging.js';
+import { realtimeRoom } from './room.js';
 
 export const socketRealtime = `
     // ------------------------------------------------------------------------
@@ -187,6 +188,7 @@ export const socketRealtime = `
     // Load Mixins
     ${realtimePresence}
     ${realtimeMessaging}
+    ${realtimeRoom}
 
     // Expose Global Class
     window.WebsimSocket = WebsimSocket;

@@ -45,6 +45,7 @@ export const generatePackageJson = (slug, dependencies = {}, devDependencies = {
 }, null, 2);
 
 // options.media: the game calls websim.upload, so images go to Reddit's media CDN.
+// options.httpDomains / options.secrets: from the port doctor's look at server.js.
 export const generateDevvitJson = (slug, entrypoints, enablePayments = true, options = {}) => {
   const config = {
     "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
@@ -93,6 +94,14 @@ export const generateDevvitJson = (slug, entrypoints, enablePayments = true, opt
       ]
     }
   };
+
+  // server.js fetches other sites: Reddit reviews each domain on upload.
+  if (options.httpDomains?.length) config.permissions.http = { "enable": true, "domains": options.httpDomains };
+  // env.SECRETS.get(name) in server.js: app secrets, set with `npx devvit settings set <name>`.
+  if (options.secrets?.length) {
+    config.settings = { "global": {} };
+    for (const name of options.secrets) config.settings.global[name] = { "type": "string", "label": name, "isSecret": true }; // Devvit's schema forbids a defaultValue on secrets
+  }
 
   if (enablePayments) {
     config.media = {

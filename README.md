@@ -30,8 +30,36 @@ Fork of `q94p2qfvrvydb_o3mc7s` (v48), built for **Devvit 0.15.1** (October 2026)
 If a project has a root `server.js` (Websim's `export default { fetch(request, env) }` with `env.DB` / `env.BLOB`), the converter copies it and everything it imports into `src/server/websim/` and runs it inside the Devvit server:
 - **env.DB:** SQLite via sql.js 1.13.0 (WebAssembly inlined at build time). The database file lives in Redis in 400 KB chunks and is saved with a versioned `watch`/`multi` transaction; a request is re-run on conflict, up to 5 times.
 - **env.BLOB:** `put(name, bytes)` stores in Redis and returns `/api/__websim_blob/<id>/<name>`.
-- **Identity:** `x-websim-user-id` / `x-websim-username` come from the Reddit user.
-- **Not supported on Reddit:** the `room` realtime export and `env.AI`.
+- **Identity:** `x-websim-user-id` / `x-websim-username` come from the Reddit user. `env.USERS.name(id)` looks up any Reddit user's current username (`t2_…` id), so servers can show usernames without storing them.
+- **Not supported on Reddit:** `env.AI`. The `room` realtime export: see "Realtime rooms" below.
+
+## Port doctor (v50+)
+
+Every conversion runs `src/doctor.js` over the game and writes **PORT-REPORT.md** into the Reddit project (the web page shows it under "Port report"; the CLI prints it). ⚠️ needs a change in the game, 🔧 handled by the port, ℹ️ worth knowing.
+
+It checks: total and per-file size, uncompressed 3D models, WebGPU without a WebGL fallback, Websim AI calls (and whether each checks the API exists), server.js and its realtime room, fetches to other sites, and inline-feed concerns (scroll areas, pointer lock).
+
+What it does on its own:
+- Every port gets `window.__portHints = { platform, view, quality, ai, room }`. For games over 15 MB, `quality` is `"lite"`; a game can read it (or `?quality=`) to load lighter assets. `--quality lite` forces it.
+- AI calls that don't check the API exists get a `websim.chat` / `imageGen` / `textToSpeech` that fails at once, so they reach their own fallback instead of throwing. Games that check first see no AI and fall back straight away.
+- Node scripts shipped with a game (anything importing `node:` modules, e.g. `tools/*.mjs`) are left out of the client.
+
+## Realtime rooms: server.js `room` (v50+)
+
+`export const room = { onConnect, onMessage, onClose, onTick, tickMs }` runs on the Devvit server (`templates/server/websim-room.js`), one room per Reddit post. The browser's `WebsimSocket.joinRoom()` (`polyfills/socket/room.js`) posts messages to `/api/__room/*` in order and in batches, and gets replies on Devvit realtime: its own channel for `conn.send` and for `room.broadcast(msg, { except })`, a shared channel for plain broadcasts. Pings every 3 s keep a connection and drive `onTick`; 30 s without one calls `onClose`.
+
+A Devvit request can land on any server instance, so each room event runs under a short Redis lock. If the room also exports `saveState()` (return its state) and `loadState(state)`, that state is saved to Redis after every event and restored on whichever instance runs the next one; Maps, Sets and conn objects inside it are handled. Without the hooks the state lives in one instance's memory, and the report warns. Database writes made in room handlers are replayed if another request saved the database first.
+
+Messages go up over HTTP, so a room is slower than a websocket: fine for lobbies and turn-based traffic, to be measured for fast real-time play.
+
+## Outside services and secrets in server.js (v51+)
+
+For games whose server talks to an outside database or API (for example Supabase):
+- **Domains:** every `https://host` string in `server.js` is requested in `devvit.json` (`permissions.http.domains`) and listed under **Fetch Domains** in the Reddit app's README, which Reddit's domain review reads. Write the reason in `server.js` as `// Fetch domain api.example.com: what it's for`; the converter copies it in, and keeps the section current in a README you've edited. Reddit reviews each domain on upload (usually 1-2 business days) and only approves public APIs and some cloud providers (Supabase, Firebase, SpacetimeDB, S3, Google Cloud Storage); the app also needs terms and privacy links. Until approval those fetches fail, so the game needs a fallback.
+- **Secrets:** `await env.SECRETS?.get('NAME')` in `server.js` reads a Devvit app secret on Reddit. Each name found becomes a secret setting in `devvit.json`; set it once after the first install with `npx devvit settings set NAME`. On Websim `env.SECRETS` is undefined (Websim has no server secrets).
+- **`env.PLATFORM`** is `'reddit'` on Devvit and undefined on Websim, so one `server.js` can tell them apart.
+
+The port doctor lists both in PORT-REPORT.md.
 
 ## File uploads (v12+)
 
@@ -42,7 +70,7 @@ If a project has a root `server.js` (Websim's `export default { fetch(request, e
 
 ## Pull merging (v13+)
 
-`npm run pull` merges Devvit CLI edits automatically (`package.json` version/license, `devvit.json` `dev`). Any other local edit is kept, with the new version saved as `<file>.incoming`.
+`npm run pull` merges Devvit CLI edits automatically (`package.json` version/license, `devvit.json` `dev` and `marketingAssets`). Any other local edit is kept, with the new version saved as `<file>.incoming`.
 
 ## Launch modes (v20: inline is the default again)
 
@@ -68,7 +96,45 @@ cd <reddit-project-folder> && npm install && npm run build && npx devvit upload
 npx devvit install <test_subreddit> <reddit-app>@<version>
 ```
 
-The first run creates the Devvit project. Later runs update it in place: generated files are replaced, and the Devvit CLI's own fields (`package.json` version/license, `devvit.json` dev) and a hand-written README.md or DEVELOPMENT.md are kept.
+The first run creates the Devvit project. Later runs update it in place: generated files are replaced, and the Devvit CLI's own fields (`package.json` version/license, `devvit.json` dev), your `devvit.json` `marketingAssets` and a hand-written README.md or DEVELOPMENT.md are kept.
+
+**App icon:** Reddit shows `marketingAssets.icon` (a 1024×1024 PNG, at most 500 KB) on the app's page. Put the file at `marketing/icon.png` in the Devvit project, not in `assets/`, `src/` or `scripts/` (those are regenerated), and add `"marketingAssets": { "icon": "marketing/icon.png" }` to `devvit.json` once.
+
+## itch.io (v51+)
+
+`cli/itch.mjs` turns a Websim game, or a Unity WebGL build, into an itch.io HTML5 upload:
+
+```bash
+npm install --prefix cli
+node cli/itch.mjs <websim-folder> <out-folder> --game <slug> --zip <game-html5.zip> [--push <user>/<game>:html5 --version 1.0.0]
+```
+
+itch.io only serves static files and gives HTML5 games no user identity. So Websim games get `src/templates/itch/itch-shim.js`, loaded first in `<head>`:
+
+- **Player:** a random id kept in localStorage. There is no username, so games should show a generated name.
+- **`server.js`** runs in the page. Same-origin `/api/*` requests go to its `fetch()`, with:
+  - `env.DB`: the D1-style API over sql.js, saved to IndexedDB, with the schema applied when it changes;
+  - `env.BLOB`: files in IndexedDB;
+  - `env.PLATFORM = 'itch'`.
+
+  The server's own requests to other sites, such as Supabase, go out as usual.
+- **`WebsimSocket` collections** are kept on the device. Presence and multiplayer do nothing.
+- `websim.chat`, `imageGen`, `textToSpeech` and `postComment` stay undefined, so games hide AI and tips.
+
+The CLI also:
+
+- rewrites root paths (`"/music.ogg"`) to relative ones, because itch serves games from a subfolder;
+- checks itch's limits: 1,000 files, 500 MB in total, 200 MB per file, 240-character paths;
+- zips the build with `index.html` at the root;
+- runs butler with `--push`. The owner runs `butler login` first.
+
+`cli/itch-test.mjs` boots a build from `/html/<id>/`, the way itch serves it, and reports page errors and missing files.
+
+Port Devvit games from their Websim source. On the itch page:
+
+- set **Kind of project: HTML**;
+- tick **played in the browser**;
+- pick the embed size and **Mobile friendly**.
 
 ## Port fixes (v15–v17)
 

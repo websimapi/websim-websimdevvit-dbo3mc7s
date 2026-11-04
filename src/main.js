@@ -386,6 +386,7 @@ async function quickBuild(link) {
 const quote = (s) => /^[A-Za-z0-9._-]+$/.test(s) ? s : JSON.stringify(s);
 
 function showPullResult({ link, changes, firstBuild }, result) {
+    showReport(result);
     const origin = location.origin;
     const folder = link.appName;
     $('result-title').textContent = `${link.title || 'Your app'} is ready for Reddit`;
@@ -413,7 +414,23 @@ function showPullResult({ link, changes, firstBuild }, result) {
     showStep(stepResult);
 }
 
+// The port doctor's findings (doctor.js), most important first; also in PORT-REPORT.md.
+function showReport(result) {
+    const findings = (result.report && result.report.findings) || [];
+    const order = { warn: 0, fixed: 1, info: 2, ok: 3 }, icon = { warn: '⚠', fixed: '🔧', info: 'ℹ', ok: '✓' };
+    const warnings = findings.filter(f => f.level === 'warn').length;
+    $('report-summary').textContent = warnings ? `Port report: ${warnings} thing${warnings === 1 ? '' : 's'} to change in the game` : 'Port report: nothing to change';
+    const list = $('report-list');
+    list.replaceChildren();
+    for (const f of [...findings].sort((a, b) => order[a.level] - order[b.level])) {
+        const li = document.createElement('li');
+        li.textContent = `${icon[f.level]} ${f.title}: ${f.detail}${f.fix ? ' ' + f.fix : ''}`;
+        list.append(li);
+    }
+}
+
 function showZipOnly(result, why) {
+    showReport(result);
     $('result-title').textContent = 'Your Reddit project is ready';
     $('result-summary').textContent = `${Object.keys(result.files).length} files for the Reddit app "${result.appName}".`;
     $('result-pull').classList.add('hidden');

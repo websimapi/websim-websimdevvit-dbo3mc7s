@@ -14,7 +14,7 @@ function setDep(dependencies, pkg, version, fallback) {
 // Detects libraries and converts CDN URLs to NPM package names
 export function normalizeImport(source, dependencies) {
     if (!source || typeof source !== 'string') return source;
-    if (source.startsWith('.') || source.startsWith('/') || source.startsWith('data:') || source.startsWith('blob:')) return source;
+    if (source.startsWith('.') || source.startsWith('/') || source.startsWith('data:') || source.startsWith('blob:') || source.startsWith('node:')) return source;
 
     // 1. Remotion Handling
     if (source.includes('@websim/remotion')) {

@@ -8,8 +8,8 @@
 // never overwrite each other. env.BLOB stores files in Redis and serves them
 // at /api/__websim_blob/<id>/<name>.
 //
-// Not available on Reddit: env.AI (no LLM access) and the `room` realtime
-// export (Devvit realtime is one-way, server to client).
+// Not available on Reddit: env.AI (no LLM access). A `room` realtime export
+// runs through websim-room.js.
 //
 // The code below is emitted as-is into src/server/index.ts; it avoids template
 // literals so it can live inside this module's template string.
@@ -22,11 +22,12 @@ import SQLJS_WASM_BASE64 from 'virtual:sqljs-wasm';
 export const websimBridge = `
 // ---------- WebSim server.js bridge ----------
 const websimServer = websimServerModule.default;
+// env.SECRETS.get(name): the app's secret settings (devvit.json settings.global).
+const wsSecrets = { async get(name) { try { const v = await settings.get(name); return v == null || v === '' ? undefined : v; } catch (e) { return undefined; } } };
 const WEBSIM_SCHEMA = typeof websimServerModule.schema === 'string' ? websimServerModule.schema : '';
 const WS_DB = 'websim:sqlite';
 const WS_CHUNK = 400000;           // characters of base64 per Redis value
 const WS_RETRIES = 5;
-if (websimServerModule.room) console.warn('[websim] server.js exports a realtime room; that part is not supported on Reddit.');
 
 let wsSQL = null;
 async function wsSqlEngine() {
@@ -141,6 +142,15 @@ router.get('/api/__websim_blob/:id/:name', async (req, res) => {
     }
 });
 
+// env.USERS.name(id): a Reddit user's current username, looked up from Reddit when it's
+// shown, so servers never need to store usernames (they go stale, and Reddit asks apps not to keep them).
+const wsUsers = {
+    async name(id) {
+        if (!/^t2_[a-z0-9]+$/i.test(String(id || ''))) return null;
+        try { return (await reddit.getUserById(id))?.username || null; } catch (e) { return null; }
+    },
+};
+
 async function wsIdentityHeaders() {
     const headers = {};
     const userId = context && context.userId;
@@ -165,7 +175,7 @@ async function wsAttempt(makeRequest) {
     try {
         const schemaHash = wsHash(WEBSIM_SCHEMA);
         if (WEBSIM_SCHEMA && meta.schema !== schemaHash) { db.exec(WEBSIM_SCHEMA); state.dirty = true; }
-        const env = { DB: wsMakeDb(db, state), BLOB: wsBlob, AI: { chat() { throw new Error('AI is not available on Reddit.'); } }, NOTIFICATIONS: { async send() {} } };
+        const env = { DB: wsMakeDb(db, state), BLOB: wsBlob, AI: { chat() { throw new Error('AI is not available on Reddit.'); } }, NOTIFICATIONS: { async send() {} }, PLATFORM: 'reddit', SECRETS: wsSecrets, USERS: wsUsers };
         const response = await websimServer.fetch(await makeRequest(), env);
         if (!state.dirty) return { response };
 
